@@ -233,36 +233,78 @@ func getEvent(eventID, loginUserID int64) (*Event, error) {
 		"C": &Sheets{},
 	}
 
-	rows, err := db.Query("SELECT * FROM sheets ORDER BY `rank`, num")
+	rows, err := db.Query(`
+	SELECT
+	    *
+	FROM
+		reservations
+	WHERE
+		event_id = ?
+	AND canceled_at IS NULL
+	GROUP BY
+		sheet_id
+	HAVING reserved_at = MIN(reserved_at)`, eventID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
+	reservationMapBySheetID := make(map[int64]Reservation, 1000)
 	for rows.Next() {
-		var sheet Sheet
-		if err := rows.Scan(&sheet.ID, &sheet.Rank, &sheet.Num, &sheet.Price); err != nil {
+		var reservation Reservation
+		if err := rows.Scan(&reservation.ID, &reservation.EventID, &reservation.SheetID, &reservation.UserID, &reservation.ReservedAt, &reservation.CanceledAt); err != nil {
 			return nil, err
 		}
+		reservationMapBySheetID[reservation.SheetID] = reservation
+	}
+
+	for _, sheetID := range sheetIDs {
+		sheet := *sheetMap[sheetID]
+		reservation := reservationMapBySheetID[sheetID]
 		event.Sheets[sheet.Rank].Price = event.Price + sheet.Price
 		event.Total++
 		event.Sheets[sheet.Rank].Total++
-
-		var reservation Reservation
-		err := db.QueryRow("SELECT * FROM reservations WHERE event_id = ? AND sheet_id = ? AND canceled_at IS NULL GROUP BY event_id, sheet_id HAVING reserved_at = MIN(reserved_at)", event.ID, sheet.ID).Scan(&reservation.ID, &reservation.EventID, &reservation.SheetID, &reservation.UserID, &reservation.ReservedAt, &reservation.CanceledAt)
-		if err == nil {
-			sheet.Mine = reservation.UserID == loginUserID
-			sheet.Reserved = true
-			sheet.ReservedAtUnix = reservation.ReservedAt.Unix()
-		} else if err == sql.ErrNoRows {
+		if reservation.ID == 0 {
 			event.Remains++
 			event.Sheets[sheet.Rank].Remains++
 		} else {
-			return nil, err
+			sheet.Mine = reservation.UserID == loginUserID
+			sheet.Reserved = true
+			sheet.ReservedAtUnix = reservation.ReservedAt.Unix()
 		}
-
 		event.Sheets[sheet.Rank].Detail = append(event.Sheets[sheet.Rank].Detail, &sheet)
 	}
+
+	// rows, err := db.Query("SELECT * FROM sheets ORDER BY `rank`, num")
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// defer rows.Close()
+
+	// for rows.Next() {
+	// 	var sheet Sheet
+	// 	if err := rows.Scan(&sheet.ID, &sheet.Rank, &sheet.Num, &sheet.Price); err != nil {
+	// 		return nil, err
+	// 	}
+	// 	event.Sheets[sheet.Rank].Price = event.Price + sheet.Price
+	// 	event.Total++
+	// 	event.Sheets[sheet.Rank].Total++
+
+	// 	var reservation Reservation
+	// 	err := db.QueryRow("SELECT * FROM reservations WHERE event_id = ? AND sheet_id = ? AND canceled_at IS NULL GROUP BY event_id, sheet_id HAVING reserved_at = MIN(reserved_at)", event.ID, sheet.ID).Scan(&reservation.ID, &reservation.EventID, &reservation.SheetID, &reservation.UserID, &reservation.ReservedAt, &reservation.CanceledAt)
+	// 	if err == nil {
+	// 		sheet.Mine = reservation.UserID == loginUserID
+	// 		sheet.Reserved = true
+	// 		sheet.ReservedAtUnix = reservation.ReservedAt.Unix()
+	// 	} else if err == sql.ErrNoRows {
+	// 		event.Remains++
+	// 		event.Sheets[sheet.Rank].Remains++
+	// 	} else {
+	// 		return nil, err
+	// 	}
+
+	// 	event.Sheets[sheet.Rank].Detail = append(event.Sheets[sheet.Rank].Detail, &sheet)
+	// }
 
 	return &event, nil
 }
@@ -308,6 +350,36 @@ func (r *Renderer) Render(w io.Writer, name string, data interface{}, c echo.Con
 }
 
 var db *sql.DB
+
+var sheetMap map[int64]*Sheet
+var sheetIDs []int64
+
+func setSheets() error {
+	// sheetMap
+	sheetMap = make(map[int64]*Sheet, 1000)
+	sheetIDs = make([]int64, 0, 1000)
+	rows, err := db.Query("SELECT * FROM sheets ORDER BY `rank`, num")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var sheet Sheet
+		if err := rows.Scan(&sheet.ID, &sheet.Rank, &sheet.Num, &sheet.Price); err != nil {
+			return err
+		}
+		sheetIDs = append(sheetIDs, sheet.ID)
+		sheetMap[sheet.ID] = &sheet
+	}
+	return nil
+}
+
+// var administratorMap map[int64]*Administrator
+
+// func setAdministrators() error {
+
+// }
 
 func main() {
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&charset=utf8mb4",
@@ -358,6 +430,9 @@ func main() {
 			return nil
 		}
 
+		if err != setSheets() {
+			return nil
+		}
 		return c.NoContent(204)
 	})
 	e.POST("/api/users", func(c echo.Context) error {
@@ -951,3 +1026,4 @@ func resError(c echo.Context, e string, status int) error {
 	}
 	return c.JSON(status, map[string]string{"error": e})
 }
+
